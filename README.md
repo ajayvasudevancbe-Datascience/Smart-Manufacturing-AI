@@ -4,7 +4,7 @@ An end-to-end Machine Learning application designed to analyze industrial machin
 
 ## Live Application
 
-**Streamlit Application:** [View Smart Manufacturing AI](YOUR-STREAMLIT-APP-LINK)
+**Streamlit Application:** [View Smart Manufacturing AI](https://smart-manufacturing-ai-nzdjnlfuvg4tfjelfjrfjh.streamlit.app)
 
 **GitHub Repository:** [Smart Manufacturing AI](https://github.com/ajayvasudevancbe-Datascience/Smart-Manufacturing-AI)
 
@@ -272,9 +272,5 @@ GitHub: https://github.com/ajayvasudevancbe-Datascience
 
 LinkedIn: https://www.linkedin.com/in/ajay-vasudevan-8800953a1/
 
-## Acknowledgement
 
-Dataset provided by the UCI Machine Learning Repository.
-
-AI4I 2020 Predictive Maintenance Dataset.
 
