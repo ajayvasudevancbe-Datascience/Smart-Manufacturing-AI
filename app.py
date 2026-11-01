@@ -5,9 +5,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
 
 from xgboost import XGBClassifier
+
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -22,8 +22,9 @@ from sklearn.metrics import (
     classification_report
 )
 
+
 # ============================================================
-# PAGE CONFIGURATION
+# 1. PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
@@ -35,8 +36,9 @@ st.set_page_config(
 st.title("🏭 Smart Manufacturing AI")
 st.caption("Machine Monitoring and Predictive Failure Detection")
 
+
 # ============================================================
-# CONFIGURATION
+# 2. CONFIGURATION
 # ============================================================
 
 DATA_URL = (
@@ -45,6 +47,7 @@ DATA_URL = (
 )
 
 MODEL_DIR = "smart_manufacturing_model"
+
 MODEL_PATH = os.path.join(MODEL_DIR, "xgb_model.pkl")
 PREPROCESSOR_PATH = os.path.join(MODEL_DIR, "preprocessor.pkl")
 METRICS_PATH = os.path.join(MODEL_DIR, "model_metrics.pkl")
@@ -66,8 +69,9 @@ CATEGORICAL_FEATURES = [
 
 FEATURE_COLUMNS = CATEGORICAL_FEATURES + NUMERIC_FEATURES
 
+
 # ============================================================
-# SESSION STATE
+# 3. SESSION STATE
 # ============================================================
 
 if "history" not in st.session_state:
@@ -76,8 +80,9 @@ if "history" not in st.session_state:
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
 
+
 # ============================================================
-# FEATURE ENGINEERING
+# 4. FEATURE ENGINEERING
 # ============================================================
 
 def create_features(data):
@@ -124,7 +129,54 @@ def create_features(data):
 
 
 # ============================================================
-# MODEL TRAINING AND LOADING
+# 5. MODEL EVALUATION FUNCTION
+# ============================================================
+
+def evaluate_model(model, preprocessor, X_test, y_test):
+
+    X_test_processed = preprocessor.transform(X_test)
+
+    predictions = model.predict(X_test_processed)
+
+    metrics = {
+        "Accuracy": accuracy_score(y_test, predictions),
+
+        "Precision": precision_score(
+            y_test,
+            predictions,
+            zero_division=0
+        ),
+
+        "Recall": recall_score(
+            y_test,
+            predictions,
+            zero_division=0
+        ),
+
+        "F1 Score": f1_score(
+            y_test,
+            predictions,
+            zero_division=0
+        ),
+
+        "Confusion Matrix": confusion_matrix(
+            y_test,
+            predictions
+        ),
+
+        "Classification Report": classification_report(
+            y_test,
+            predictions,
+            zero_division=0,
+            output_dict=True
+        )
+    }
+
+    return metrics
+
+
+# ============================================================
+# 6. MODEL TRAINING AND LOADING
 # ============================================================
 
 @st.cache_resource
@@ -132,118 +184,157 @@ def load_or_train_model():
 
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    # Load saved model if both files exist
+    # Download dataset
+    df = pd.read_csv(DATA_URL)
+
+    df = create_features(df)
+
+    X = df[FEATURE_COLUMNS].copy()
+    y = df["Machine failure"].astype(int)
+
+    # Fixed train-test split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.20,
+        random_state=42,
+        stratify=y
+    )
+
+    # --------------------------------------------------------
+    # LOAD EXISTING MODEL
+    # --------------------------------------------------------
+
     if (
         os.path.exists(MODEL_PATH)
         and os.path.exists(PREPROCESSOR_PATH)
     ):
 
         model = joblib.load(MODEL_PATH)
+
         preprocessor = joblib.load(PREPROCESSOR_PATH)
 
-        metrics = None
-
+        # Load saved metrics when available
         if os.path.exists(METRICS_PATH):
+
             metrics = joblib.load(METRICS_PATH)
 
-        return model, preprocessor, metrics, "Loaded saved model"
+        else:
 
-    # Download dataset and train model
-    try:
-        df = pd.read_csv(DATA_URL)
-
-        df = create_features(df)
-
-        # Exclude identifiers, target, and failure-mode columns
-        X = df[FEATURE_COLUMNS].copy()
-        y = df["Machine failure"].astype(int)
-
-        numeric_pipeline = Pipeline([
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler())
-        ])
-
-        categorical_pipeline = Pipeline([
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("encoder", OneHotEncoder(handle_unknown="ignore"))
-        ])
-
-        preprocessor = ColumnTransformer([
-            ("num", numeric_pipeline, NUMERIC_FEATURES),
-            ("cat", categorical_pipeline, CATEGORICAL_FEATURES)
-        ])
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            X,
-            y,
-            test_size=0.20,
-            random_state=42,
-            stratify=y
-        )
-
-        X_train_processed = preprocessor.fit_transform(X_train)
-        X_test_processed = preprocessor.transform(X_test)
-
-        negative_count = int((y_train == 0).sum())
-        positive_count = int((y_train == 1).sum())
-
-        model = XGBClassifier(
-            n_estimators=300,
-            max_depth=5,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            scale_pos_weight=negative_count / max(positive_count, 1),
-            eval_metric="logloss",
-            random_state=42,
-            n_jobs=-1
-        )
-
-        model.fit(X_train_processed, y_train)
-
-        # Evaluate on the held-out test set
-        predictions = model.predict(X_test_processed)
-
-        metrics = {
-            "Accuracy": accuracy_score(y_test, predictions),
-            "Precision": precision_score(
-                y_test, predictions, zero_division=0
-            ),
-            "Recall": recall_score(
-                y_test, predictions, zero_division=0
-            ),
-            "F1 Score": f1_score(
-                y_test, predictions, zero_division=0
-            ),
-            "Confusion Matrix": confusion_matrix(
-                y_test, predictions
-            ),
-            "Classification Report": classification_report(
-                y_test,
-                predictions,
-                zero_division=0,
-                output_dict=True
+            # Calculate metrics for saved model
+            metrics = evaluate_model(
+                model,
+                preprocessor,
+                X_test,
+                y_test
             )
-        }
 
-        joblib.dump(model, MODEL_PATH)
-        joblib.dump(preprocessor, PREPROCESSOR_PATH)
-        joblib.dump(metrics, METRICS_PATH)
+            joblib.dump(metrics, METRICS_PATH)
 
-        return model, preprocessor, metrics, "Model trained successfully"
-
-    except Exception as error:
-        raise RuntimeError(
-            f"Unable to load or train the model: {error}"
+        return (
+            model,
+            preprocessor,
+            metrics,
+            "Saved model loaded and evaluated successfully"
         )
+
+    # --------------------------------------------------------
+    # TRAIN NEW MODEL
+    # --------------------------------------------------------
+
+    numeric_pipeline = Pipeline([
+        (
+            "imputer",
+            SimpleImputer(strategy="median")
+        ),
+        (
+            "scaler",
+            StandardScaler()
+        )
+    ])
+
+    categorical_pipeline = Pipeline([
+        (
+            "imputer",
+            SimpleImputer(strategy="most_frequent")
+        ),
+        (
+            "encoder",
+            OneHotEncoder(handle_unknown="ignore")
+        )
+    ])
+
+    preprocessor = ColumnTransformer([
+        (
+            "num",
+            numeric_pipeline,
+            NUMERIC_FEATURES
+        ),
+        (
+            "cat",
+            categorical_pipeline,
+            CATEGORICAL_FEATURES
+        )
+    ])
+
+    X_train_processed = preprocessor.fit_transform(X_train)
+
+    negative_count = int((y_train == 0).sum())
+    positive_count = int((y_train == 1).sum())
+
+    model = XGBClassifier(
+        n_estimators=300,
+        max_depth=5,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        scale_pos_weight=negative_count / max(positive_count, 1),
+        eval_metric="logloss",
+        random_state=42,
+        n_jobs=-1
+    )
+
+    model.fit(
+        X_train_processed,
+        y_train
+    )
+
+    # Evaluate new model
+    metrics = evaluate_model(
+        model,
+        preprocessor,
+        X_test,
+        y_test
+    )
+
+    # Save all files
+    joblib.dump(model, MODEL_PATH)
+
+    joblib.dump(
+        preprocessor,
+        PREPROCESSOR_PATH
+    )
+
+    joblib.dump(
+        metrics,
+        METRICS_PATH
+    )
+
+    return (
+        model,
+        preprocessor,
+        metrics,
+        "New model trained and evaluated successfully"
+    )
 
 
 # ============================================================
-# LOAD MODEL
+# 7. LOAD MODEL
 # ============================================================
 
 try:
-    with st.spinner("Loading Smart Manufacturing AI model..."):
+
+    with st.spinner("Loading and evaluating AI model..."):
 
         model, preprocessor, model_metrics, model_status = (
             load_or_train_model()
@@ -252,19 +343,21 @@ try:
     st.sidebar.success(model_status)
 
 except Exception as error:
-    st.error(str(error))
+
+    st.error(f"Model loading error: {error}")
+
     st.info(
-        "Check your internet connection and ensure all requirements "
-        "are installed."
+        "Check your internet connection and installed requirements."
     )
+
     st.stop()
 
 
 # ============================================================
-# SIDEBAR NAVIGATION
+# 8. SIDEBAR NAVIGATION
 # ============================================================
 
-st.sidebar.title("Navigation")
+st.sidebar.title("🏭 Navigation")
 
 pages = [
     "Dashboard",
@@ -282,11 +375,14 @@ selected_page = st.sidebar.radio(
 )
 
 st.sidebar.divider()
-st.sidebar.caption("Smart Manufacturing AI | Predictive Maintenance")
+
+st.sidebar.caption(
+    "Smart Manufacturing AI"
+)
 
 
 # ============================================================
-# HELPER: PREPARE A SINGLE PREDICTION
+# 9. PREDICTION FUNCTION
 # ============================================================
 
 def predict_failure(input_data):
@@ -295,11 +391,15 @@ def predict_failure(input_data):
 
     processed = preprocessor.transform(input_df)
 
-    prediction = int(model.predict(processed)[0])
+    prediction = int(
+        model.predict(processed)[0]
+    )
 
     probabilities = model.predict_proba(processed)[0]
 
-    failure_probability = float(probabilities[1]) * 100
+    failure_probability = float(
+        probabilities[1] * 100
+    )
 
     return prediction, failure_probability
 
@@ -312,7 +412,9 @@ if selected_page == "Dashboard":
 
     st.header("📊 Dashboard")
 
-    history_df = pd.DataFrame(st.session_state.history)
+    history_df = pd.DataFrame(
+        st.session_state.history
+    )
 
     total = len(history_df)
 
@@ -331,8 +433,11 @@ if selected_page == "Dashboard":
     col1, col2, col3, col4 = st.columns(4)
 
     col1.metric("Total Predictions", total)
+
     col2.metric("Failure Predictions", failures)
+
     col3.metric("Normal Predictions", normal)
+
     col4.metric(
         "Average Failure Probability",
         f"{average_probability:.2f}%"
@@ -345,9 +450,12 @@ if selected_page == "Dashboard":
         left, right = st.columns(2)
 
         with left:
+
             st.subheader("Prediction Distribution")
 
-            distribution = history_df["Prediction"].value_counts()
+            distribution = (
+                history_df["Prediction"].value_counts()
+            )
 
             fig = px.pie(
                 values=distribution.values,
@@ -355,9 +463,13 @@ if selected_page == "Dashboard":
                 title="Normal vs Failure"
             )
 
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(
+                fig,
+                use_container_width=True
+            )
 
         with right:
+
             st.subheader("Failure Probability")
 
             fig = px.histogram(
@@ -367,7 +479,10 @@ if selected_page == "Dashboard":
                 title="Prediction Probability Distribution"
             )
 
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(
+                fig,
+                use_container_width=True
+            )
 
         st.subheader("Recent Predictions")
 
@@ -377,9 +492,10 @@ if selected_page == "Dashboard":
         )
 
     else:
+
         st.info(
             "No prediction history available. "
-            "Go to the Prediction page to make your first prediction."
+            "Make your first prediction."
         )
 
 
@@ -441,16 +557,23 @@ elif selected_page == "Machine Monitoring":
             value=100
         )
 
-    temperature_difference = process_temp - air_temp
+    temperature_difference = (
+        process_temp - air_temp
+    )
 
-    power = (2 * np.pi * speed * torque) / 60
+    power = (
+        2 * np.pi * speed * torque / 60
+    )
 
     if wear <= 50:
         wear_category = "Low"
+
     elif wear <= 150:
         wear_category = "Medium"
+
     elif wear <= 250:
         wear_category = "High"
+
     else:
         wear_category = "Very High"
 
@@ -501,7 +624,10 @@ elif selected_page == "Machine Monitoring":
         title="Machine Sensor Values"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
     st.caption(
         "These are manually entered readings, not live factory sensor data."
@@ -576,6 +702,7 @@ elif selected_page == "Prediction":
     if submitted:
 
         if process_temp < air_temp:
+
             st.warning(
                 "Process temperature is lower than air temperature. "
                 "Please verify the readings."
@@ -585,16 +712,26 @@ elif selected_page == "Prediction":
 
             input_data = {
                 "Type": machine_type,
+
                 "Air temperature [K]": air_temp,
+
                 "Process temperature [K]": process_temp,
+
                 "Rotational speed [rpm]": speed,
+
                 "Torque [Nm]": torque,
+
                 "Tool wear [min]": wear,
-                "Temperature Difference [K]": process_temp - air_temp,
+
+                "Temperature Difference [K]": (
+                    process_temp - air_temp
+                ),
+
                 "Power [W]": (
                     2 * np.pi * speed * torque / 60
                 ),
-                "Tool Wear Category": (
+
+                "Tool Wear Category": wear_category if False else (
                     "Low" if wear <= 50
                     else "Medium" if wear <= 150
                     else "High" if wear <= 250
@@ -602,7 +739,9 @@ elif selected_page == "Prediction":
                 )
             }
 
-            prediction, probability = predict_failure(input_data)
+            prediction, probability = predict_failure(
+                input_data
+            )
 
             result = (
                 "Failure" if prediction == 1 else "Normal"
@@ -617,34 +756,50 @@ elif selected_page == "Prediction":
                 "Time": pd.Timestamp.now().strftime(
                     "%Y-%m-%d %H:%M:%S"
                 ),
+
                 "Machine Type": machine_type,
+
                 "Air Temperature [K]": air_temp,
+
                 "Process Temperature [K]": process_temp,
+
                 "Rotational Speed [rpm]": speed,
+
                 "Torque [Nm]": torque,
+
                 "Tool Wear [min]": wear,
+
                 "Prediction": result,
-                "Failure Probability (%)": round(probability, 2)
+
+                "Failure Probability (%)": round(
+                    probability, 2
+                )
             })
 
     if st.session_state.last_result is not None:
 
         result = st.session_state.last_result["Prediction"]
+
         probability = st.session_state.last_result[
             "Failure Probability (%)"
         ]
 
         st.divider()
+
         st.subheader("Prediction Result")
 
         if result == "Failure":
+
             st.error("⚠️ Predicted Machine Failure")
+
         else:
+
             st.success("✅ Predicted Normal Operation")
 
         col1, col2 = st.columns(2)
 
         col1.metric("Prediction", result)
+
         col2.metric(
             "Failure Probability",
             f"{probability:.2f}%"
@@ -652,6 +807,7 @@ elif selected_page == "Prediction":
 
         probability_df = pd.DataFrame({
             "Class": ["Normal", "Failure"],
+
             "Probability": [
                 100 - probability,
                 probability
@@ -666,7 +822,10 @@ elif selected_page == "Prediction":
             title="Prediction Probability"
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
         st.caption(
             "This is a model estimate, not a confirmed diagnosis "
@@ -682,7 +841,9 @@ elif selected_page == "History":
 
     st.header("📜 Prediction History")
 
-    history_df = pd.DataFrame(st.session_state.history)
+    history_df = pd.DataFrame(
+        st.session_state.history
+    )
 
     if not history_df.empty:
 
@@ -703,13 +864,18 @@ elif selected_page == "History":
             title="Failure Probability Over Time"
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
-        csv = history_df.to_csv(index=False).encode("utf-8")
+        csv_data = history_df.to_csv(
+            index=False
+        ).encode("utf-8")
 
         st.download_button(
             "Download Prediction History CSV",
-            data=csv,
+            data=csv_data,
             file_name="machine_prediction_history.csv",
             mime="text/csv"
         )
@@ -717,11 +883,13 @@ elif selected_page == "History":
         if st.button("Clear Prediction History"):
 
             st.session_state.history = []
+
             st.session_state.last_result = None
 
             st.rerun()
 
     else:
+
         st.info("No prediction history available yet.")
 
 
@@ -772,6 +940,7 @@ elif selected_page == "Model Performance":
                 "Recall",
                 "F1 Score"
             ],
+
             "Score": [
                 model_metrics["Accuracy"],
                 model_metrics["Precision"],
@@ -790,11 +959,16 @@ elif selected_page == "Model Performance":
             title="XGBoost Model Evaluation"
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
         st.subheader("Confusion Matrix")
 
-        cm = np.array(model_metrics["Confusion Matrix"])
+        cm = np.array(
+            model_metrics["Confusion Matrix"]
+        )
 
         fig = px.imshow(
             cm,
@@ -809,7 +983,10 @@ elif selected_page == "Model Performance":
             title="Confusion Matrix"
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
         st.subheader("Classification Report")
 
@@ -817,18 +994,24 @@ elif selected_page == "Model Performance":
             model_metrics["Classification Report"]
         ).transpose()
 
-        st.dataframe(report, use_container_width=True)
+        st.dataframe(
+            report,
+            use_container_width=True
+        )
+
+        st.success(
+            "Evaluation metrics successfully loaded or calculated."
+        )
 
     else:
+
         st.warning(
-            "Evaluation metrics are unavailable for this saved model. "
-            "Remove the saved model files and restart the app to retrain "
-            "and calculate metrics."
+            "Evaluation metrics are not available."
         )
 
 
 # ============================================================
-# PAGE 6: SAMPLE DATA UPLOAD
+# PAGE 6: SAMPLE DATA
 # ============================================================
 
 elif selected_page == "Sample Data":
@@ -836,19 +1019,17 @@ elif selected_page == "Sample Data":
     st.header("📂 Sample Data Analysis")
 
     st.write(
-        "Upload a CSV file to explore its actual records, "
-        "columns, missing values, statistics and charts."
+        "Upload a CSV file to explore its actual dataset values."
     )
 
     st.info(
-        "This page is for dataset exploration. Uploaded data is not "
-        "automatically used to retrain the model or added to prediction history."
+        "Uploaded data is used for exploration only. "
+        "It is not automatically used to retrain the model."
     )
 
     uploaded_file = st.file_uploader(
         "Upload Sample CSV Dataset",
-        type=["csv"],
-        help="Choose a CSV file from your computer."
+        type=["csv"]
     )
 
     if uploaded_file is not None:
@@ -858,17 +1039,24 @@ elif selected_page == "Sample Data":
             sample_df = pd.read_csv(uploaded_file)
 
             if sample_df.empty:
-                st.warning("The uploaded CSV file contains no records.")
+
+                st.warning(
+                    "The uploaded CSV file contains no records."
+                )
 
             else:
 
-                st.success("CSV file uploaded successfully!")
+                st.success(
+                    "CSV file uploaded successfully!"
+                )
 
                 # Dataset overview
                 st.subheader("Dataset Overview")
 
                 total_rows = sample_df.shape[0]
+
                 total_columns = sample_df.shape[1]
+
                 missing_values = int(
                     sample_df.isnull().sum().sum()
                 )
@@ -876,12 +1064,14 @@ elif selected_page == "Sample Data":
                 col1, col2, col3 = st.columns(3)
 
                 col1.metric("Total Rows", total_rows)
+
                 col2.metric("Total Columns", total_columns)
+
                 col3.metric("Missing Values", missing_values)
 
                 st.divider()
 
-                # Full dataset
+                # Display complete dataset
                 st.subheader("Uploaded Dataset Values")
 
                 st.dataframe(
@@ -890,11 +1080,11 @@ elif selected_page == "Sample Data":
                     height=400
                 )
 
-                # Sample records
+                # Display sample records
                 st.subheader("Sample Records")
 
                 number_of_rows = st.slider(
-                    "Select number of rows to display",
+                    "Select number of rows",
                     min_value=1,
                     max_value=min(total_rows, 100),
                     value=min(10, total_rows)
@@ -905,21 +1095,24 @@ elif selected_page == "Sample Data":
                     use_container_width=True
                 )
 
-                # Column information
                 st.divider()
 
+                # Column information
                 st.subheader("Column Information")
 
                 column_info = pd.DataFrame({
                     "Column Name": sample_df.columns,
+
                     "Data Type": [
                         str(dtype)
                         for dtype in sample_df.dtypes
                     ],
+
                     "Missing Values": [
                         int(value)
                         for value in sample_df.isnull().sum()
                     ],
+
                     "Unique Values": [
                         int(sample_df[col].nunique(dropna=True))
                         for col in sample_df.columns
@@ -931,9 +1124,9 @@ elif selected_page == "Sample Data":
                     use_container_width=True
                 )
 
-                # Numerical statistics
                 st.divider()
 
+                # Numerical statistics
                 st.subheader("Numerical Statistics")
 
                 numeric_df = sample_df.select_dtypes(
@@ -948,13 +1141,14 @@ elif selected_page == "Sample Data":
                     )
 
                 else:
+
                     st.info(
-                        "No numerical columns found in this dataset."
+                        "No numerical columns found."
                     )
 
-                # Chart exploration
                 st.divider()
 
+                # Data visualization
                 st.subheader("Data Visualization")
 
                 available_columns = sample_df.columns.tolist()
@@ -992,6 +1186,7 @@ elif selected_page == "Sample Data":
                         )
 
                     else:
+
                         st.warning(
                             "Histogram requires a numerical column."
                         )
@@ -1014,6 +1209,7 @@ elif selected_page == "Sample Data":
                         )
 
                     else:
+
                         st.warning(
                             "Box Plot requires a numerical column."
                         )
@@ -1063,6 +1259,7 @@ elif selected_page == "Sample Data":
                         )
 
                     else:
+
                         st.warning(
                             "Line Chart requires a numerical column."
                         )
@@ -1072,7 +1269,9 @@ elif selected_page == "Sample Data":
 
                     st.divider()
 
-                    st.subheader("Machine Failure Distribution")
+                    st.subheader(
+                        "Machine Failure Distribution"
+                    )
 
                     failure_counts = (
                         sample_df["Machine failure"]
@@ -1114,17 +1313,13 @@ elif selected_page == "Sample Data":
         except Exception as error:
 
             st.error(
-                f"Unable to read the uploaded CSV file: {error}"
+                f"Unable to read CSV file: {error}"
             )
 
     else:
 
         st.info(
-            "Upload a CSV file above to display its dataset values."
-        )
-
-        st.markdown(
-            "**Example dataset:** AI4I 2020 Predictive Maintenance Dataset"
+            "Upload a CSV file above to display its values."
         )
 
         st.markdown(
@@ -1143,9 +1338,9 @@ elif selected_page == "About Project":
 
     st.write(
         """
-        **Smart Manufacturing AI – Machine Monitoring and Failure Prediction**
-        is a machine learning application designed to estimate the
-        possibility of industrial machine failure using sensor readings.
+        **Smart Manufacturing AI – Machine Monitoring and Failure
+        Prediction** is a machine learning application that estimates
+        the possibility of industrial machine failure using sensor data.
         """
     )
 
@@ -1155,8 +1350,8 @@ elif selected_page == "About Project":
     - Analyze machine sensor data.
     - Perform data cleaning and feature engineering.
     - Develop a machine failure prediction model.
-    - Evaluate the model using classification metrics.
-    - Display machine predictions through an interactive dashboard.
+    - Evaluate model performance.
+    - Visualize machine predictions.
     - Explore uploaded CSV datasets.
     """)
 
@@ -1205,7 +1400,7 @@ elif selected_page == "About Project":
     """)
 
     st.caption(
-        "Note: This project uses a synthetic benchmark dataset. "
+        "This project uses a synthetic benchmark dataset. "
         "It is a demonstration of predictive maintenance, not a "
         "validated industrial safety system."
     )
@@ -1220,5 +1415,9 @@ st.divider()
 st.caption(
     "Smart Manufacturing AI | Machine Monitoring and Failure Prediction"
 )
+
+
+
+
 
 
