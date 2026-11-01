@@ -7,110 +7,49 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
-from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
     recall_score,
-    f1_score
+    f1_score,
+    confusion_matrix,
+    classification_report
 )
-from xgboost import XGBClassifier
 
-# ==========================================================
-# 1. PAGE CONFIGURATION
-# ==========================================================
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="Smart Manufacturing AI",
     page_icon="🏭",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# ==========================================================
-# 2. CUSTOM CSS
-# ==========================================================
+st.title("🏭 Smart Manufacturing AI")
+st.caption("Machine Monitoring and Predictive Failure Detection")
 
-st.markdown("""
-<style>
-.main {
-    background-color: #f5f7fb;
-}
-
-.block-container {
-    padding-top: 1.5rem;
-    padding-bottom: 2rem;
-}
-
-.dashboard-title {
-    font-size: 32px;
-    font-weight: 800;
-    color: #17365d;
-}
-
-.dashboard-subtitle {
-    color: #64748b;
-    font-size: 15px;
-}
-
-div[data-testid="stMetric"] {
-    background: white;
-    border: 1px solid #e2e8f0;
-    padding: 18px;
-    border-radius: 12px;
-}
-
-div.stButton > button {
-    border-radius: 9px;
-    font-weight: 600;
-    min-height: 42px;
-}
-
-</style>
-""", unsafe_allow_html=True)
-
-# ==========================================================
-# 3. PROJECT CONFIGURATION
-# ==========================================================
-
-MODEL_DIR = "smart_manufacturing_model"
-
-MODEL_PATH = os.path.join(
-    MODEL_DIR, "xgb_model.pkl"
-)
-
-PREPROCESSOR_PATH = os.path.join(
-    MODEL_DIR, "preprocessor.pkl"
-)
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 DATA_URL = (
     "https://archive.ics.uci.edu/ml/"
     "machine-learning-databases/00601/ai4i2020.csv"
 )
 
-os.makedirs(MODEL_DIR, exist_ok=True)
+MODEL_DIR = "smart_manufacturing_model"
+MODEL_PATH = os.path.join(MODEL_DIR, "xgb_model.pkl")
+PREPROCESSOR_PATH = os.path.join(MODEL_DIR, "preprocessor.pkl")
+METRICS_PATH = os.path.join(MODEL_DIR, "model_metrics.pkl")
 
-# ==========================================================
-# 4. FEATURE ENGINEERING
-# ==========================================================
-
-FEATURE_COLUMNS = [
-    "Type",
-    "Air temperature [K]",
-    "Process temperature [K]",
-    "Rotational speed [rpm]",
-    "Torque [Nm]",
-    "Tool wear [min]",
-    "Temperature Difference [K]",
-    "Power [W]",
-    "Tool Wear Category"
-]
-
-NUMERIC_COLUMNS = [
+NUMERIC_FEATURES = [
     "Air temperature [K]",
     "Process temperature [K]",
     "Rotational speed [rpm]",
@@ -120,212 +59,212 @@ NUMERIC_COLUMNS = [
     "Power [W]"
 ]
 
-CATEGORICAL_COLUMNS = [
+CATEGORICAL_FEATURES = [
     "Type",
     "Tool Wear Category"
 ]
 
+FEATURE_COLUMNS = CATEGORICAL_FEATURES + NUMERIC_FEATURES
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+if "last_result" not in st.session_state:
+    st.session_state.last_result = None
+
+# ============================================================
+# FEATURE ENGINEERING
+# ============================================================
 
 def create_features(data):
 
-    data = data.copy()
+    df = data.copy()
 
-    data["Temperature Difference [K]"] = (
-        data["Process temperature [K]"]
-        - data["Air temperature [K]"]
+    required_columns = [
+        "Type",
+        "Air temperature [K]",
+        "Process temperature [K]",
+        "Rotational speed [rpm]",
+        "Torque [Nm]",
+        "Tool wear [min]"
+    ]
+
+    missing = [
+        col for col in required_columns
+        if col not in df.columns
+    ]
+
+    if missing:
+        raise ValueError(
+            "Missing required columns: " + ", ".join(missing)
+        )
+
+    df["Temperature Difference [K]"] = (
+        df["Process temperature [K]"]
+        - df["Air temperature [K]"]
     )
 
-    data["Power [W]"] = (
+    df["Power [W]"] = (
         2 * np.pi
-        * data["Rotational speed [rpm]"]
-        * data["Torque [Nm]"] / 60
+        * df["Rotational speed [rpm]"]
+        * df["Torque [Nm]"] / 60
     )
 
-    data["Tool Wear Category"] = pd.cut(
-        data["Tool wear [min]"],
+    df["Tool Wear Category"] = pd.cut(
+        df["Tool wear [min]"],
         bins=[-1, 50, 150, 250, np.inf],
         labels=["Low", "Medium", "High", "Very High"]
-    ).astype(str)
+    )
 
-    return data
+    return df
 
 
-# ==========================================================
-# 5. MODEL TRAINING AND LOADING
-# ==========================================================
+# ============================================================
+# MODEL TRAINING AND LOADING
+# ============================================================
 
 @st.cache_resource
 def load_or_train_model():
 
-    # Load existing model
+    os.makedirs(MODEL_DIR, exist_ok=True)
+
+    # Load saved model if both files exist
     if (
         os.path.exists(MODEL_PATH)
         and os.path.exists(PREPROCESSOR_PATH)
     ):
 
         model = joblib.load(MODEL_PATH)
+        preprocessor = joblib.load(PREPROCESSOR_PATH)
 
-        preprocessor = joblib.load(
-            PREPROCESSOR_PATH
-        )
+        metrics = None
 
-        return model, preprocessor, None
+        if os.path.exists(METRICS_PATH):
+            metrics = joblib.load(METRICS_PATH)
 
-    # Download dataset if model files are missing
-    df = pd.read_csv(DATA_URL)
+        return model, preprocessor, metrics, "Loaded saved model"
 
-    df = create_features(df)
-
-    X = df[FEATURE_COLUMNS]
-
-    y = df["Machine failure"]
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.20,
-        random_state=42,
-        stratify=y
-    )
-
-    numeric_transformer = Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler", StandardScaler())
-    ])
-
-    categorical_transformer = Pipeline([
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("encoder", OneHotEncoder(handle_unknown="ignore"))
-    ])
-
-    preprocessor = ColumnTransformer([
-        ("numeric", numeric_transformer, NUMERIC_COLUMNS),
-        ("categorical", categorical_transformer, CATEGORICAL_COLUMNS)
-    ])
-
-    X_train_processed = preprocessor.fit_transform(
-        X_train
-    )
-
-    X_test_processed = preprocessor.transform(
-        X_test
-    )
-
-    negative_count = int((y_train == 0).sum())
-    positive_count = int((y_train == 1).sum())
-
-    model = XGBClassifier(
-        n_estimators=300,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        scale_pos_weight=negative_count / max(positive_count, 1),
-        eval_metric="logloss",
-        random_state=42,
-        n_jobs=-1
-    )
-
-    model.fit(
-        X_train_processed,
-        y_train
-    )
-
-    predictions = model.predict(
-        X_test_processed
-    )
-
-    metrics = {
-        "Accuracy": accuracy_score(y_test, predictions),
-        "Precision": precision_score(
-            y_test, predictions, zero_division=0
-        ),
-        "Recall": recall_score(
-            y_test, predictions, zero_division=0
-        ),
-        "F1 Score": f1_score(
-            y_test, predictions, zero_division=0
-        )
-    }
-
-    joblib.dump(model, MODEL_PATH)
-
-    joblib.dump(
-        preprocessor,
-        PREPROCESSOR_PATH
-    )
-
-    return model, preprocessor, metrics
-
-
-# ==========================================================
-# 6. LOAD MODEL
-# ==========================================================
-
-st.title("🏭 Smart Manufacturing AI")
-
-st.caption(
-    "Machine Monitoring | Predictive Maintenance | AI Analytics"
-)
-
-with st.spinner("Loading or training the machine learning model..."):
-
+    # Download dataset and train model
     try:
+        df = pd.read_csv(DATA_URL)
 
-        model, preprocessor, model_metrics = (
+        df = create_features(df)
+
+        # Exclude identifiers, target, and failure-mode columns
+        X = df[FEATURE_COLUMNS].copy()
+        y = df["Machine failure"].astype(int)
+
+        numeric_pipeline = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler())
+        ])
+
+        categorical_pipeline = Pipeline([
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("encoder", OneHotEncoder(handle_unknown="ignore"))
+        ])
+
+        preprocessor = ColumnTransformer([
+            ("num", numeric_pipeline, NUMERIC_FEATURES),
+            ("cat", categorical_pipeline, CATEGORICAL_FEATURES)
+        ])
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X,
+            y,
+            test_size=0.20,
+            random_state=42,
+            stratify=y
+        )
+
+        X_train_processed = preprocessor.fit_transform(X_train)
+        X_test_processed = preprocessor.transform(X_test)
+
+        negative_count = int((y_train == 0).sum())
+        positive_count = int((y_train == 1).sum())
+
+        model = XGBClassifier(
+            n_estimators=300,
+            max_depth=5,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            scale_pos_weight=negative_count / max(positive_count, 1),
+            eval_metric="logloss",
+            random_state=42,
+            n_jobs=-1
+        )
+
+        model.fit(X_train_processed, y_train)
+
+        # Evaluate on the held-out test set
+        predictions = model.predict(X_test_processed)
+
+        metrics = {
+            "Accuracy": accuracy_score(y_test, predictions),
+            "Precision": precision_score(
+                y_test, predictions, zero_division=0
+            ),
+            "Recall": recall_score(
+                y_test, predictions, zero_division=0
+            ),
+            "F1 Score": f1_score(
+                y_test, predictions, zero_division=0
+            ),
+            "Confusion Matrix": confusion_matrix(
+                y_test, predictions
+            ),
+            "Classification Report": classification_report(
+                y_test,
+                predictions,
+                zero_division=0,
+                output_dict=True
+            )
+        }
+
+        joblib.dump(model, MODEL_PATH)
+        joblib.dump(preprocessor, PREPROCESSOR_PATH)
+        joblib.dump(metrics, METRICS_PATH)
+
+        return model, preprocessor, metrics, "Model trained successfully"
+
+    except Exception as error:
+        raise RuntimeError(
+            f"Unable to load or train the model: {error}"
+        )
+
+
+# ============================================================
+# LOAD MODEL
+# ============================================================
+
+try:
+    with st.spinner("Loading Smart Manufacturing AI model..."):
+
+        model, preprocessor, model_metrics, model_status = (
             load_or_train_model()
         )
 
-    except Exception as error:
+    st.sidebar.success(model_status)
 
-        st.error(
-            f"Unable to load or train model: {error}"
-        )
-
-        st.info(
-            "Check your internet connection and dataset URL, "
-            "or verify the model files."
-        )
-
-        st.stop()
-
-if model_metrics is not None:
-
-    st.success(
-        "XGBoost model trained and saved successfully."
+except Exception as error:
+    st.error(str(error))
+    st.info(
+        "Check your internet connection and ensure all requirements "
+        "are installed."
     )
-
-else:
-
-    st.success(
-        "Saved XGBoost model loaded successfully."
-    )
+    st.stop()
 
 
-# ==========================================================
-# 7. SESSION STATE
-# ==========================================================
+# ============================================================
+# SIDEBAR NAVIGATION
+# ============================================================
 
-if "history" not in st.session_state:
-
-    st.session_state.history = []
-
-if "page" not in st.session_state:
-
-    st.session_state.page = "Dashboard"
-
-if "last_result" not in st.session_state:
-
-    st.session_state.last_result = None
-
-
-# ==========================================================
-# 8. SIDEBAR NAVIGATION
-# ==========================================================
-
-st.sidebar.title("🏭 Smart Manufacturing")
-
-st.sidebar.caption("AI Predictive Maintenance System")
+st.sidebar.title("Navigation")
 
 pages = [
     "Dashboard",
@@ -333,34 +272,128 @@ pages = [
     "Prediction",
     "History",
     "Model Performance",
+    "Sample Data",
     "About Project"
 ]
 
 selected_page = st.sidebar.radio(
-    "Navigation",
-    pages,
-    index=pages.index(st.session_state.page),
-    key="navigation"
+    "Select Page",
+    pages
 )
-
-st.session_state.page = selected_page
 
 st.sidebar.divider()
-
-st.sidebar.success("XGBoost Model: Ready")
-
-st.sidebar.caption(
-    "Dataset: AI4I 2020 Predictive Maintenance"
-)
+st.sidebar.caption("Smart Manufacturing AI | Predictive Maintenance")
 
 
-# ==========================================================
-# 9. MACHINE SENSOR INPUTS
-# ==========================================================
+# ============================================================
+# HELPER: PREPARE A SINGLE PREDICTION
+# ============================================================
 
-def machine_input_form():
+def predict_failure(input_data):
 
-    st.subheader("⚙️ Machine Sensor Configuration")
+    input_df = pd.DataFrame([input_data])
+
+    processed = preprocessor.transform(input_df)
+
+    prediction = int(model.predict(processed)[0])
+
+    probabilities = model.predict_proba(processed)[0]
+
+    failure_probability = float(probabilities[1]) * 100
+
+    return prediction, failure_probability
+
+
+# ============================================================
+# PAGE 1: DASHBOARD
+# ============================================================
+
+if selected_page == "Dashboard":
+
+    st.header("📊 Dashboard")
+
+    history_df = pd.DataFrame(st.session_state.history)
+
+    total = len(history_df)
+
+    failures = (
+        int((history_df["Prediction"] == "Failure").sum())
+        if total else 0
+    )
+
+    normal = total - failures
+
+    average_probability = (
+        history_df["Failure Probability (%)"].mean()
+        if total else 0
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Total Predictions", total)
+    col2.metric("Failure Predictions", failures)
+    col3.metric("Normal Predictions", normal)
+    col4.metric(
+        "Average Failure Probability",
+        f"{average_probability:.2f}%"
+    )
+
+    st.divider()
+
+    if total > 0:
+
+        left, right = st.columns(2)
+
+        with left:
+            st.subheader("Prediction Distribution")
+
+            distribution = history_df["Prediction"].value_counts()
+
+            fig = px.pie(
+                values=distribution.values,
+                names=distribution.index,
+                title="Normal vs Failure"
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+        with right:
+            st.subheader("Failure Probability")
+
+            fig = px.histogram(
+                history_df,
+                x="Failure Probability (%)",
+                nbins=15,
+                title="Prediction Probability Distribution"
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Recent Predictions")
+
+        st.dataframe(
+            history_df.tail(10).iloc[::-1],
+            use_container_width=True
+        )
+
+    else:
+        st.info(
+            "No prediction history available. "
+            "Go to the Prediction page to make your first prediction."
+        )
+
+
+# ============================================================
+# PAGE 2: MACHINE MONITORING
+# ============================================================
+
+elif selected_page == "Machine Monitoring":
+
+    st.header("⚙️ Machine Monitoring")
+
+    st.write(
+        "Enter machine sensor readings to calculate monitoring features."
+    )
 
     col1, col2 = st.columns(2)
 
@@ -368,332 +401,49 @@ def machine_input_form():
 
         machine_type = st.selectbox(
             "Machine Type",
-            ["L", "M", "H"],
-            key="machine_type"
+            ["L", "M", "H"]
         )
 
         air_temp = st.number_input(
             "Air Temperature (K)",
-            290.0,
-            310.0,
-            300.0,
-            step=0.1
+            min_value=250.0,
+            max_value=350.0,
+            value=298.0
         )
 
         process_temp = st.number_input(
             "Process Temperature (K)",
-            290.0,
-            320.0,
-            310.0,
-            step=0.1
+            min_value=250.0,
+            max_value=400.0,
+            value=308.0
         )
 
     with col2:
 
-        rotational_speed = st.number_input(
+        speed = st.number_input(
             "Rotational Speed (rpm)",
-            1000,
-            3000,
-            1500,
-            step=10
+            min_value=500,
+            max_value=4000,
+            value=1500
         )
 
         torque = st.number_input(
             "Torque (Nm)",
-            0.0,
-            100.0,
-            40.0,
-            step=0.5
+            min_value=1.0,
+            max_value=100.0,
+            value=40.0
         )
 
-        tool_wear = st.number_input(
+        wear = st.number_input(
             "Tool Wear (min)",
-            0,
-            300,
-            100,
-            step=1
+            min_value=0,
+            max_value=300,
+            value=100
         )
 
-    return {
-        "Type": machine_type,
-        "Air temperature [K]": air_temp,
-        "Process temperature [K]": process_temp,
-        "Rotational speed [rpm]": rotational_speed,
-        "Torque [Nm]": torque,
-        "Tool wear [min]": tool_wear
-    }
+    temperature_difference = process_temp - air_temp
 
-
-def prepare_input(values):
-
-    data = pd.DataFrame([values])
-
-    data = create_features(data)
-
-    return data[FEATURE_COLUMNS]
-
-
-# ==========================================================
-# 10. MAKE PREDICTION
-# ==========================================================
-
-def predict_machine(values):
-
-    input_data = prepare_input(values)
-
-    processed_data = preprocessor.transform(
-        input_data
-    )
-
-    prediction = int(
-        model.predict(processed_data)[0]
-    )
-
-    probabilities = model.predict_proba(
-        processed_data
-    )[0]
-
-    normal_probability = float(probabilities[0] * 100)
-
-    failure_probability = float(probabilities[1] * 100)
-
-    status = (
-        "Machine Failure Predicted"
-        if prediction == 1
-        else "Normal Machine Operation"
-    )
-
-    result = {
-        "Time": pd.Timestamp.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-        "Machine Type": values["Type"],
-        "Air Temperature (K)": values["Air temperature [K]"],
-        "Process Temperature (K)": values["Process temperature [K]"],
-        "Rotational Speed (rpm)": values["Rotational speed [rpm]"],
-        "Torque (Nm)": values["Torque [Nm]"],
-        "Tool Wear (min)": values["Tool wear [min]"],
-        "Prediction": status,
-        "Failure Probability (%)": round(
-            failure_probability, 2
-        ),
-        "Normal Probability (%)": round(
-            normal_probability, 2
-        )
-    }
-
-    return prediction, result
-
-
-# ==========================================================
-# 11. DASHBOARD PAGE
-# ==========================================================
-
-if st.session_state.page == "Dashboard":
-
-    st.markdown(
-        '<p class="dashboard-title">📊 Interactive Dashboard</p>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown(
-        '<p class="dashboard-subtitle">'
-        'Machine analytics and predictive maintenance overview'
-        '</p>',
-        unsafe_allow_html=True
-    )
-
-    history_df = pd.DataFrame(
-        st.session_state.history
-    )
-
-    total = len(history_df)
-
-    if total > 0:
-
-        failures = int(
-            (
-                history_df["Prediction"]
-                == "Machine Failure Predicted"
-            ).sum()
-        )
-
-        normal = total - failures
-
-        avg_failure_probability = history_df[
-            "Failure Probability (%)"
-        ].mean()
-
-    else:
-
-        failures = 0
-        normal = 0
-        avg_failure_probability = 0.0
-
-    # KPI CARDS
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-        "Total Predictions",
-        total
-    )
-
-    c2.metric(
-        "Failure Predictions",
-        failures
-    )
-
-    c3.metric(
-        "Normal Predictions",
-        normal
-    )
-
-    c4.metric(
-        "Average Failure Probability",
-        f"{avg_failure_probability:.2f}%"
-    )
-
-    st.divider()
-
-    # DASHBOARD FILTER
-
-    st.subheader("🔎 Dashboard Filters")
-
-    if total > 0:
-
-        available_types = sorted(
-            history_df["Machine Type"].unique().tolist()
-        )
-
-        selected_types = st.multiselect(
-            "Filter by Machine Type",
-            available_types,
-            default=available_types
-        )
-
-        filtered_df = history_df[
-            history_df["Machine Type"].isin(selected_types)
-        ]
-
-    else:
-
-        filtered_df = history_df
-
-        st.info(
-            "Make predictions in the Prediction page "
-            "to populate dashboard analytics."
-        )
-
-    # CHARTS
-
-    chart1, chart2 = st.columns(2)
-
-    with chart1:
-
-        st.subheader("Machine Status Distribution")
-
-        if len(filtered_df) > 0:
-
-            counts = filtered_df["Prediction"].value_counts()
-
-            fig = px.pie(
-                values=counts.values,
-                names=counts.index,
-                hole=0.5,
-                title="Normal vs Failure Predictions"
-            )
-
-            st.plotly_chart(
-                fig,
-                use_container_width=True
-            )
-
-        else:
-
-            st.info("No prediction data available.")
-
-    with chart2:
-
-        st.subheader("Failure Probability")
-
-        if len(filtered_df) > 0:
-
-            fig = px.histogram(
-                filtered_df,
-                x="Failure Probability (%)",
-                nbins=10,
-                title="Distribution of Failure Probability"
-            )
-
-            st.plotly_chart(
-                fig,
-                use_container_width=True
-            )
-
-        else:
-
-            st.info("No probability data available.")
-
-    st.divider()
-
-    # TREND CHART
-
-    st.subheader("📈 Failure Probability Trend")
-
-    if len(filtered_df) > 0:
-
-        fig = px.line(
-            filtered_df,
-            x="Time",
-            y="Failure Probability (%)",
-            color="Machine Type",
-            markers=True
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    else:
-
-        st.info("Prediction trends will appear here.")
-
-    # RECENT PREDICTIONS
-
-    st.subheader("🕒 Recent Predictions")
-
-    if len(filtered_df) > 0:
-
-        st.dataframe(
-            filtered_df.tail(10).iloc[::-1],
-            use_container_width=True,
-            hide_index=True
-        )
-
-
-# ==========================================================
-# 12. MACHINE MONITORING PAGE
-# ==========================================================
-
-elif st.session_state.page == "Machine Monitoring":
-
-    st.title("⚙️ Machine Monitoring")
-
-    values = machine_input_form()
-
-    air = values["Air temperature [K]"]
-    process = values["Process temperature [K]"]
-    speed = values["Rotational speed [rpm]"]
-    torque_value = values["Torque [Nm]"]
-    wear = values["Tool wear [min]"]
-
-    temp_difference = process - air
-
-    power = (
-        2 * np.pi * speed * torque_value / 60
-    )
+    power = (2 * np.pi * speed * torque) / 60
 
     if wear <= 50:
         wear_category = "Low"
@@ -706,24 +456,24 @@ elif st.session_state.page == "Machine Monitoring":
 
     st.divider()
 
-    st.subheader("Live Input Sensor Overview")
+    st.subheader("Calculated Sensor Features")
 
-    m1, m2, m3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
 
-    m1.metric("Air Temperature", f"{air:.2f} K")
-    m2.metric("Process Temperature", f"{process:.2f} K")
-    m3.metric("Temperature Difference", f"{temp_difference:.2f} K")
+    c1.metric(
+        "Temperature Difference",
+        f"{temperature_difference:.2f} K"
+    )
 
-    m4, m5, m6 = st.columns(3)
+    c2.metric(
+        "Power",
+        f"{power:.2f} W"
+    )
 
-    m4.metric("Rotational Speed", f"{speed} rpm")
-    m5.metric("Torque", f"{torque_value:.2f} Nm")
-    m6.metric("Tool Wear", f"{wear} min")
-
-    m7, m8 = st.columns(2)
-
-    m7.metric("Calculated Power", f"{power:.2f} W")
-    m8.metric("Tool Wear Category", wear_category)
+    c3.metric(
+        "Tool Wear Category",
+        wear_category
+    )
 
     sensor_df = pd.DataFrame({
         "Sensor": [
@@ -734,198 +484,237 @@ elif st.session_state.page == "Machine Monitoring":
             "Tool Wear"
         ],
         "Value": [
-            air,
-            process,
+            air_temp,
+            process_temp,
             speed,
-            torque_value,
+            torque,
             wear
         ]
     })
 
-    st.subheader("Sensor Visualization")
+    st.subheader("Sensor Readings")
 
     fig = px.bar(
         sensor_df,
         x="Sensor",
         y="Value",
-        color="Sensor",
-        title="Machine Sensor Measurements"
+        title="Machine Sensor Values"
     )
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.caption(
+        "These are manually entered readings, not live factory sensor data."
     )
 
-    with st.expander("View Engineered Features"):
 
-        engineered = prepare_input(values)
+# ============================================================
+# PAGE 3: PREDICTION
+# ============================================================
 
-        st.dataframe(
-            engineered,
+elif selected_page == "Prediction":
+
+    st.header("🤖 Machine Failure Prediction")
+
+    st.write(
+        "Enter machine sensor values to predict possible machine failure."
+    )
+
+    with st.form("prediction_form"):
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            machine_type = st.selectbox(
+                "Machine Type",
+                ["L", "M", "H"]
+            )
+
+            air_temp = st.number_input(
+                "Air Temperature (K)",
+                min_value=250.0,
+                max_value=350.0,
+                value=298.0
+            )
+
+            process_temp = st.number_input(
+                "Process Temperature (K)",
+                min_value=250.0,
+                max_value=400.0,
+                value=308.0
+            )
+
+            speed = st.number_input(
+                "Rotational Speed (rpm)",
+                min_value=500,
+                max_value=4000,
+                value=1500
+            )
+
+        with col2:
+
+            torque = st.number_input(
+                "Torque (Nm)",
+                min_value=1.0,
+                max_value=100.0,
+                value=40.0
+            )
+
+            wear = st.number_input(
+                "Tool Wear (min)",
+                min_value=0,
+                max_value=300,
+                value=100
+            )
+
+        submitted = st.form_submit_button(
+            "Predict Machine Failure",
             use_container_width=True
         )
 
+    if submitted:
 
-# ==========================================================
-# 13. PREDICTION PAGE
-# ==========================================================
-
-elif st.session_state.page == "Prediction":
-
-    st.title("🤖 Machine Failure Prediction")
-
-    st.write(
-        "Enter machine sensor readings to predict the "
-        "possibility of machine failure."
-    )
-
-    values = machine_input_form()
-
-    st.divider()
-
-    if st.button(
-        "🚀 Predict Machine Failure",
-        type="primary",
-        use_container_width=True
-    ):
-
-        try:
-
-            prediction, result = predict_machine(values)
-
-            st.session_state.history.append(result)
-
-            st.session_state.last_result = result
-
-            st.subheader("Prediction Result")
-
-            if prediction == 1:
-
-                st.error("⚠️ Machine Failure Predicted")
-
-                st.warning(
-                    "The model predicts a possible machine failure. "
-                    "Please inspect the machine."
-                )
-
-            else:
-
-                st.success("✅ Normal Machine Operation")
-
-                st.info(
-                    "The model predicts normal operation "
-                    "for the supplied sensor values."
-                )
-
-            p1, p2 = st.columns(2)
-
-            p1.metric(
-                "Failure Probability",
-                f"{result['Failure Probability (%)']:.2f}%"
+        if process_temp < air_temp:
+            st.warning(
+                "Process temperature is lower than air temperature. "
+                "Please verify the readings."
             )
 
-            p2.metric(
-                "Normal Probability",
-                f"{result['Normal Probability (%)']:.2f}%"
+        else:
+
+            input_data = {
+                "Type": machine_type,
+                "Air temperature [K]": air_temp,
+                "Process temperature [K]": process_temp,
+                "Rotational speed [rpm]": speed,
+                "Torque [Nm]": torque,
+                "Tool wear [min]": wear,
+                "Temperature Difference [K]": process_temp - air_temp,
+                "Power [W]": (
+                    2 * np.pi * speed * torque / 60
+                ),
+                "Tool Wear Category": (
+                    "Low" if wear <= 50
+                    else "Medium" if wear <= 150
+                    else "High" if wear <= 250
+                    else "Very High"
+                )
+            }
+
+            prediction, probability = predict_failure(input_data)
+
+            result = (
+                "Failure" if prediction == 1 else "Normal"
             )
 
-            probability_df = pd.DataFrame({
-                "Condition": ["Normal", "Failure"],
-                "Probability": [
-                    result["Normal Probability (%)"],
-                    result["Failure Probability (%)"]
-                ]
+            st.session_state.last_result = {
+                "Prediction": result,
+                "Failure Probability (%)": probability
+            }
+
+            st.session_state.history.append({
+                "Time": pd.Timestamp.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+                "Machine Type": machine_type,
+                "Air Temperature [K]": air_temp,
+                "Process Temperature [K]": process_temp,
+                "Rotational Speed [rpm]": speed,
+                "Torque [Nm]": torque,
+                "Tool Wear [min]": wear,
+                "Prediction": result,
+                "Failure Probability (%)": round(probability, 2)
             })
 
-            fig = px.bar(
-                probability_df,
-                x="Condition",
-                y="Probability",
-                color="Condition",
-                text_auto=".2f",
-                title="Prediction Probability"
-            )
+    if st.session_state.last_result is not None:
 
-            fig.update_layout(
-                yaxis_range=[0, 100]
-            )
+        result = st.session_state.last_result["Prediction"]
+        probability = st.session_state.last_result[
+            "Failure Probability (%)"
+        ]
 
-            st.plotly_chart(
-                fig,
-                use_container_width=True
-            )
+        st.divider()
+        st.subheader("Prediction Result")
 
-        except Exception as error:
+        if result == "Failure":
+            st.error("⚠️ Predicted Machine Failure")
+        else:
+            st.success("✅ Predicted Normal Operation")
 
-            st.error(
-                f"Prediction failed: {error}"
-            )
+        col1, col2 = st.columns(2)
 
-
-# ==========================================================
-# 14. HISTORY PAGE
-# ==========================================================
-
-elif st.session_state.page == "History":
-
-    st.title("📋 Prediction History")
-
-    if st.session_state.history:
-
-        history_df = pd.DataFrame(
-            st.session_state.history
+        col1.metric("Prediction", result)
+        col2.metric(
+            "Failure Probability",
+            f"{probability:.2f}%"
         )
 
-        st.metric(
-            "Total Recorded Predictions",
-            len(history_df)
+        probability_df = pd.DataFrame({
+            "Class": ["Normal", "Failure"],
+            "Probability": [
+                100 - probability,
+                probability
+            ]
+        })
+
+        fig = px.bar(
+            probability_df,
+            x="Class",
+            y="Probability",
+            text_auto=".2f",
+            title="Prediction Probability"
         )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.caption(
+            "This is a model estimate, not a confirmed diagnosis "
+            "of actual machine condition."
+        )
+
+
+# ============================================================
+# PAGE 4: HISTORY
+# ============================================================
+
+elif selected_page == "History":
+
+    st.header("📜 Prediction History")
+
+    history_df = pd.DataFrame(st.session_state.history)
+
+    if not history_df.empty:
+
+        st.subheader("All Predictions")
 
         st.dataframe(
-            history_df.sort_values(
-                "Time",
-                ascending=False
-            ),
-            use_container_width=True,
-            hide_index=True
+            history_df,
+            use_container_width=True
         )
 
-        st.subheader("Prediction Analytics")
+        st.subheader("Prediction Probability Analysis")
 
         fig = px.scatter(
             history_df,
             x="Time",
             y="Failure Probability (%)",
             color="Prediction",
-            size="Tool Wear (min)",
-            hover_data=[
-                "Machine Type",
-                "Rotational Speed (rpm)",
-                "Torque (Nm)"
-            ]
+            title="Failure Probability Over Time"
         )
 
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
+        st.plotly_chart(fig, use_container_width=True)
 
-        csv_data = history_df.to_csv(
-            index=False
-        ).encode("utf-8")
+        csv = history_df.to_csv(index=False).encode("utf-8")
 
         st.download_button(
-            "📥 Download Prediction History",
-            data=csv_data,
+            "Download Prediction History CSV",
+            data=csv,
             file_name="machine_prediction_history.csv",
-            mime="text/csv",
-            use_container_width=True
+            mime="text/csv"
         )
 
-        if st.button(
-            "🗑️ Clear Prediction History"
-        ):
+        if st.button("Clear Prediction History"):
 
             st.session_state.history = []
             st.session_state.last_result = None
@@ -933,104 +722,476 @@ elif st.session_state.page == "History":
             st.rerun()
 
     else:
-
-        st.info(
-            "No prediction records available. "
-            "Go to Prediction and run your first prediction."
-        )
+        st.info("No prediction history available yet.")
 
 
-# ==========================================================
-# 15. MODEL PERFORMANCE PAGE
-# ==========================================================
+# ============================================================
+# PAGE 5: MODEL PERFORMANCE
+# ============================================================
 
-elif st.session_state.page == "Model Performance":
+elif selected_page == "Model Performance":
 
-    st.title("📈 Model Performance")
+    st.header("📈 Model Performance")
+
+    st.write(
+        "Evaluation results from the model's held-out test dataset."
+    )
 
     if model_metrics is not None:
 
-        st.info(
-            "These are the metrics from the model trained "
-            "during this application session."
+        col1, col2, col3, col4 = st.columns(4)
+
+        col1.metric(
+            "Accuracy",
+            f"{model_metrics['Accuracy'] * 100:.2f}%"
         )
 
-        cols = st.columns(4)
+        col2.metric(
+            "Precision",
+            f"{model_metrics['Precision'] * 100:.2f}%"
+        )
 
-        for col, (name, value) in zip(
-            cols, model_metrics.items()
-        ):
+        col3.metric(
+            "Recall",
+            f"{model_metrics['Recall'] * 100:.2f}%"
+        )
 
-            col.metric(
-                name,
-                f"{value:.2%}"
-            )
+        col4.metric(
+            "F1 Score",
+            f"{model_metrics['F1 Score'] * 100:.2f}%"
+        )
+
+        st.divider()
+
+        st.subheader("Evaluation Metrics")
 
         metric_df = pd.DataFrame({
-            "Metric": list(model_metrics.keys()),
-            "Score": list(model_metrics.values())
+            "Metric": [
+                "Accuracy",
+                "Precision",
+                "Recall",
+                "F1 Score"
+            ],
+            "Score": [
+                model_metrics["Accuracy"],
+                model_metrics["Precision"],
+                model_metrics["Recall"],
+                model_metrics["F1 Score"]
+            ]
         })
 
         fig = px.bar(
             metric_df,
             x="Metric",
             y="Score",
-            text_auto=".2%",
-            title="XGBoost Evaluation Metrics"
+            text=metric_df["Score"].map(
+                lambda value: f"{value:.3f}"
+            ),
+            title="XGBoost Model Evaluation"
         )
 
-        fig.update_layout(
-            yaxis_range=[0, 1]
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Confusion Matrix")
+
+        cm = np.array(model_metrics["Confusion Matrix"])
+
+        fig = px.imshow(
+            cm,
+            text_auto=True,
+            x=["Predicted Normal", "Predicted Failure"],
+            y=["Actual Normal", "Actual Failure"],
+            labels={
+                "x": "Predicted",
+                "y": "Actual",
+                "color": "Count"
+            },
+            title="Confusion Matrix"
         )
 
-        st.plotly_chart(
-            fig,
-            use_container_width=True
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Classification Report")
+
+        report = pd.DataFrame(
+            model_metrics["Classification Report"]
+        ).transpose()
+
+        st.dataframe(report, use_container_width=True)
+
+    else:
+        st.warning(
+            "Evaluation metrics are unavailable for this saved model. "
+            "Remove the saved model files and restart the app to retrain "
+            "and calculate metrics."
         )
+
+
+# ============================================================
+# PAGE 6: SAMPLE DATA UPLOAD
+# ============================================================
+
+elif selected_page == "Sample Data":
+
+    st.header("📂 Sample Data Analysis")
+
+    st.write(
+        "Upload a CSV file to explore its actual records, "
+        "columns, missing values, statistics and charts."
+    )
+
+    st.info(
+        "This page is for dataset exploration. Uploaded data is not "
+        "automatically used to retrain the model or added to prediction history."
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload Sample CSV Dataset",
+        type=["csv"],
+        help="Choose a CSV file from your computer."
+    )
+
+    if uploaded_file is not None:
+
+        try:
+
+            sample_df = pd.read_csv(uploaded_file)
+
+            if sample_df.empty:
+                st.warning("The uploaded CSV file contains no records.")
+
+            else:
+
+                st.success("CSV file uploaded successfully!")
+
+                # Dataset overview
+                st.subheader("Dataset Overview")
+
+                total_rows = sample_df.shape[0]
+                total_columns = sample_df.shape[1]
+                missing_values = int(
+                    sample_df.isnull().sum().sum()
+                )
+
+                col1, col2, col3 = st.columns(3)
+
+                col1.metric("Total Rows", total_rows)
+                col2.metric("Total Columns", total_columns)
+                col3.metric("Missing Values", missing_values)
+
+                st.divider()
+
+                # Full dataset
+                st.subheader("Uploaded Dataset Values")
+
+                st.dataframe(
+                    sample_df,
+                    use_container_width=True,
+                    height=400
+                )
+
+                # Sample records
+                st.subheader("Sample Records")
+
+                number_of_rows = st.slider(
+                    "Select number of rows to display",
+                    min_value=1,
+                    max_value=min(total_rows, 100),
+                    value=min(10, total_rows)
+                )
+
+                st.dataframe(
+                    sample_df.head(number_of_rows),
+                    use_container_width=True
+                )
+
+                # Column information
+                st.divider()
+
+                st.subheader("Column Information")
+
+                column_info = pd.DataFrame({
+                    "Column Name": sample_df.columns,
+                    "Data Type": [
+                        str(dtype)
+                        for dtype in sample_df.dtypes
+                    ],
+                    "Missing Values": [
+                        int(value)
+                        for value in sample_df.isnull().sum()
+                    ],
+                    "Unique Values": [
+                        int(sample_df[col].nunique(dropna=True))
+                        for col in sample_df.columns
+                    ]
+                })
+
+                st.dataframe(
+                    column_info,
+                    use_container_width=True
+                )
+
+                # Numerical statistics
+                st.divider()
+
+                st.subheader("Numerical Statistics")
+
+                numeric_df = sample_df.select_dtypes(
+                    include=np.number
+                )
+
+                if not numeric_df.empty:
+
+                    st.dataframe(
+                        numeric_df.describe().round(2),
+                        use_container_width=True
+                    )
+
+                else:
+                    st.info(
+                        "No numerical columns found in this dataset."
+                    )
+
+                # Chart exploration
+                st.divider()
+
+                st.subheader("Data Visualization")
+
+                available_columns = sample_df.columns.tolist()
+
+                selected_column = st.selectbox(
+                    "Select a column",
+                    available_columns
+                )
+
+                chart_type = st.selectbox(
+                    "Select chart type",
+                    [
+                        "Histogram",
+                        "Box Plot",
+                        "Bar Chart",
+                        "Line Chart"
+                    ]
+                )
+
+                if chart_type == "Histogram":
+
+                    if pd.api.types.is_numeric_dtype(
+                        sample_df[selected_column]
+                    ):
+
+                        fig = px.histogram(
+                            sample_df,
+                            x=selected_column,
+                            title=f"Distribution of {selected_column}"
+                        )
+
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True
+                        )
+
+                    else:
+                        st.warning(
+                            "Histogram requires a numerical column."
+                        )
+
+                elif chart_type == "Box Plot":
+
+                    if pd.api.types.is_numeric_dtype(
+                        sample_df[selected_column]
+                    ):
+
+                        fig = px.box(
+                            sample_df,
+                            y=selected_column,
+                            title=f"Box Plot of {selected_column}"
+                        )
+
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True
+                        )
+
+                    else:
+                        st.warning(
+                            "Box Plot requires a numerical column."
+                        )
+
+                elif chart_type == "Bar Chart":
+
+                    counts = (
+                        sample_df[selected_column]
+                        .astype(str)
+                        .value_counts()
+                        .head(30)
+                        .reset_index()
+                    )
+
+                    counts.columns = [
+                        selected_column,
+                        "Count"
+                    ]
+
+                    fig = px.bar(
+                        counts,
+                        x=selected_column,
+                        y="Count",
+                        title=f"Count of {selected_column}"
+                    )
+
+                    st.plotly_chart(
+                        fig,
+                        use_container_width=True
+                    )
+
+                elif chart_type == "Line Chart":
+
+                    if pd.api.types.is_numeric_dtype(
+                        sample_df[selected_column]
+                    ):
+
+                        fig = px.line(
+                            sample_df,
+                            y=selected_column,
+                            title=f"Line Chart of {selected_column}"
+                        )
+
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True
+                        )
+
+                    else:
+                        st.warning(
+                            "Line Chart requires a numerical column."
+                        )
+
+                # Machine failure distribution
+                if "Machine failure" in sample_df.columns:
+
+                    st.divider()
+
+                    st.subheader("Machine Failure Distribution")
+
+                    failure_counts = (
+                        sample_df["Machine failure"]
+                        .value_counts(dropna=False)
+                        .reset_index()
+                    )
+
+                    failure_counts.columns = [
+                        "Machine Failure",
+                        "Count"
+                    ]
+
+                    fig = px.pie(
+                        failure_counts,
+                        names="Machine Failure",
+                        values="Count",
+                        title="Normal vs Failure Distribution"
+                    )
+
+                    st.plotly_chart(
+                        fig,
+                        use_container_width=True
+                    )
+
+                # Download uploaded data
+                st.divider()
+
+                csv_data = sample_df.to_csv(
+                    index=False
+                ).encode("utf-8")
+
+                st.download_button(
+                    "Download Uploaded Dataset",
+                    data=csv_data,
+                    file_name="uploaded_sample_data.csv",
+                    mime="text/csv"
+                )
+
+        except Exception as error:
+
+            st.error(
+                f"Unable to read the uploaded CSV file: {error}"
+            )
 
     else:
 
         st.info(
-            "The saved model was loaded. Evaluation metrics "
-            "were not recalculated in this session."
+            "Upload a CSV file above to display its dataset values."
+        )
+
+        st.markdown(
+            "**Example dataset:** AI4I 2020 Predictive Maintenance Dataset"
+        )
+
+        st.markdown(
+            "[Download AI4I Dataset CSV]"
+            "(https://archive.ics.uci.edu/ml/machine-learning-databases/00601/ai4i2020.csv)"
         )
 
 
-# ==========================================================
-# 16. ABOUT PROJECT PAGE
-# ==========================================================
+# ============================================================
+# PAGE 7: ABOUT PROJECT
+# ============================================================
 
-elif st.session_state.page == "About":
+elif selected_page == "About Project":
 
-    st.title("ℹ️ About Smart Manufacturing AI")
+    st.header("ℹ️ About Smart Manufacturing AI")
+
+    st.write(
+        """
+        **Smart Manufacturing AI – Machine Monitoring and Failure Prediction**
+        is a machine learning application designed to estimate the
+        possibility of industrial machine failure using sensor readings.
+        """
+    )
+
+    st.subheader("Project Objectives")
 
     st.markdown("""
-    ### Project Overview
+    - Analyze machine sensor data.
+    - Perform data cleaning and feature engineering.
+    - Develop a machine failure prediction model.
+    - Evaluate the model using classification metrics.
+    - Display machine predictions through an interactive dashboard.
+    - Explore uploaded CSV datasets.
+    """)
 
-    Smart Manufacturing AI is a predictive maintenance
-    application designed to estimate machine failure risk
-    using machine operating parameters.
+    st.subheader("Dataset Information")
 
-    ### Dataset
+    st.markdown("""
+    - Dataset: AI4I 2020 Predictive Maintenance Dataset
+    - Source: UCI Machine Learning Repository
+    - Records: 10,000
+    - Target: Machine failure
+    - Dataset type: Synthetic predictive maintenance data
+    """)
 
-    **AI4I 2020 Predictive Maintenance Dataset**
+    st.markdown(
+        "[Open UCI Dataset]"
+        "(https://archive.ics.uci.edu/dataset/601/ai4i+2020+predictive+maintenance+dataset)"
+    )
 
-    - 10,000 records
-    - 14 original columns
-    - Synthetic industrial machine data
-    - Target: Machine Failure
+    st.subheader("Technologies Used")
 
-    ### Technologies
-
+    st.markdown("""
     - Python
     - Pandas and NumPy
     - Scikit-learn
     - XGBoost
-    - Streamlit
     - Plotly
+    - Streamlit
+    - Joblib
+    - Machine Learning
+    - Data Visualization
+    """)
 
-    ### Machine Learning Workflow
+    st.subheader("Machine Learning Workflow")
 
+    st.markdown("""
     1. Dataset Collection
     2. Data Understanding
     3. Data Cleaning
@@ -1043,25 +1204,21 @@ elif st.session_state.page == "About":
     10. Interactive Dashboard
     """)
 
-    st.markdown(
-        "[AI4I 2020 Dataset – UCI Repository]"
-        "(https://archive.ics.uci.edu/dataset/601/ai4i+2020+predictive+maintenance+dataset)"
-    )
-
-    st.warning(
-        "This is an educational demonstration using synthetic data. "
-        "It is not a live industrial monitoring system or a "
-        "certified machine safety solution."
+    st.caption(
+        "Note: This project uses a synthetic benchmark dataset. "
+        "It is a demonstration of predictive maintenance, not a "
+        "validated industrial safety system."
     )
 
 
-# ==========================================================
-# 17. FOOTER
-# ==========================================================
+# ============================================================
+# FOOTER
+# ============================================================
 
 st.divider()
 
 st.caption(
-    "Smart Manufacturing AI | Machine Monitoring and "
-    "Failure Prediction | Python + XGBoost + Streamlit"
+    "Smart Manufacturing AI | Machine Monitoring and Failure Prediction"
 )
+
+
